@@ -35,10 +35,10 @@ from tensorflow.python.keras.layers import Concatenate
 from tensorflow.python.keras.layers import Conv3D
 from tensorflow.python.keras.layers import Dense
 from tensorflow.python.keras.layers import GlobalAveragePooling3D
-from tensorflow.python.keras.layers import Input
+from tensorflow.python.keras.layers import Input,Lambda
 from tensorflow.python.keras.layers import MaxPooling3D
 from tensorflow.python.keras.models import Model
-
+import tensorflow as tf
 
 
 def identity_block(input_tensor, kernel_size, filters, stage, block, path, non_degenerate_temporal_conv=False):
@@ -175,12 +175,16 @@ def SlowFast_Network(clip_shape=[64,224,224,3],num_class = 400,alpha=8,beta=1/8,
   """
 
   clip_shape = clip_shape
-  slow_input_shape = [int(clip_shape[0]/tau),clip_shape[1],clip_shape[2],clip_shape[3]]
-  fast_input_shape = [int(slow_input_shape[0]*alpha),slow_input_shape[1],slow_input_shape[2],slow_input_shape[3]]
-  print('slow_path_input_shape',slow_input_shape)
-  print('fast_path_input_shape',fast_input_shape)
-  slow_input = Input(shape=slow_input_shape)
-  fast_input = Input(shape=fast_input_shape)
+
+  clip_input = Input(shape=clip_shape)
+  def data_layer(input,stride):
+      return tf.gather(input,tf.range(0,64,stride),axis=1)
+
+  slow_input = Lambda(data_layer,arguments={'stride':tau},name='slow_input')(clip_input)
+  fast_input = Lambda(data_layer,arguments={'stride':int(tau/alpha)},name='fast_input')(clip_input)
+  print('slow_path_input_shape',slow_input.shape)
+  print('fast_path_input_shape',fast_input.shape)
+
   if K.image_data_format() == 'channels_last':
     bn_axis = 4
   else:
@@ -219,18 +223,18 @@ def SlowFast_Network(clip_shape=[64,224,224,3],num_class = 400,alpha=8,beta=1/8,
   x = BatchNormalization(axis=bn_axis, name='slow_bn_conv1')(x)
   x = Activation('relu')(x)
   pool1 = MaxPooling3D((1, 3, 3), strides=(1, 2, 2),name='poo1_slow')(x)
-  pool1_conection = lateral_connection(pool1_fast,pool1,alpha=alpha,beta=beta)
+  pool1_conection = lateral_connection(pool1_fast,pool1,method=method,alpha=alpha,beta=beta)
 
   x = conv_block(pool1_conection, [1, 3, 3], [64, 64, 256], stage=2, block='a', strides=(1, 1 ,1), path='slow')
   x = identity_block(x, [1, 3, 3], [64, 64, 256], stage=2, block='b', path='slow')
   res2 = identity_block(x, [1, 3, 3], [64, 64, 256], stage=2, block='c', path='slow')
-  res2_conection = lateral_connection(res2_fast,res2,alpha=alpha,beta=beta)
+  res2_conection = lateral_connection(res2_fast,res2,method=method,alpha=alpha,beta=beta)
 
   x = conv_block(res2_conection, [1, 3, 3], [128, 128, 512], stage=3, block='a', path='slow')
   x = identity_block(x, [1, 3, 3], [128, 128, 512], stage=3, block='b', path='slow')
   x = identity_block(x, [1, 3, 3], [128, 128, 512], stage=3, block='c', path='slow')
   res3 = identity_block(x, [1, 3, 3], [128, 128, 512], stage=3, block='d', path='slow')
-  res3_conection = lateral_connection(res3_fast,res3,alpha=alpha,beta=beta)
+  res3_conection = lateral_connection(res3_fast,res3,method=method,alpha=alpha,beta=beta)
 
   x = conv_block(res3_conection, [1, 3, 3], [256, 256, 1024], stage=4, block='a', path='slow', non_degenerate_temporal_conv=True)
   x = identity_block(x, [1, 3, 3], [256, 256, 1024], stage=4, block='b', path='slow', non_degenerate_temporal_conv=True)
@@ -238,7 +242,7 @@ def SlowFast_Network(clip_shape=[64,224,224,3],num_class = 400,alpha=8,beta=1/8,
   x = identity_block(x, [1, 3, 3], [256, 256, 1024], stage=4, block='d', path='slow', non_degenerate_temporal_conv=True)
   x = identity_block(x, [1, 3, 3], [256, 256, 1024], stage=4, block='e', path='slow', non_degenerate_temporal_conv=True)
   res4 = identity_block(x, [1, 3, 3], [256, 256, 1024], stage=4, block='f', path='slow', non_degenerate_temporal_conv=True)
-  res4_conection = lateral_connection(res4_fast,res4,alpha=alpha,beta=beta)
+  res4_conection = lateral_connection(res4_fast,res4,method=method,alpha=alpha,beta=beta)
 
   x = conv_block(res4_conection, [1, 3, 3], [512, 512, 2048], stage=5, block='a', path='slow', non_degenerate_temporal_conv=True)
   x = identity_block(x, [1, 3, 3], [512, 512, 2048], stage=5, block='b', path='slow', non_degenerate_temporal_conv=True)
@@ -250,7 +254,7 @@ def SlowFast_Network(clip_shape=[64,224,224,3],num_class = 400,alpha=8,beta=1/8,
   output = Dense(num_class,activation='softmax',name = 'fc')(concat_output)
 
   # Create model.
-  inputs = [slow_input,fast_input]
+  inputs = clip_input
   output = output
   model = Model(inputs, output, name='slowfast_resnet50')
 

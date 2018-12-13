@@ -6,6 +6,5 @@
 .idea
 *.iml
 __pycache__
-SlowFast-Networks-tensorflow/__pycache__/
 out
 gen
