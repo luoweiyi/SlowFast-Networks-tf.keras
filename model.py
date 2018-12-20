@@ -37,7 +37,10 @@ from tensorflow.python.keras.layers import Dense
 from tensorflow.python.keras.layers import GlobalAveragePooling3D
 from tensorflow.python.keras.layers import Input,Lambda
 from tensorflow.python.keras.layers import MaxPooling3D
+from tensorflow.python.keras.layers import Dropout
+from tensorflow.python.keras.layers import Reshape,Add
 from tensorflow.python.keras.models import Model
+from tensorflow.python.keras.regularizers import l2
 import tensorflow as tf
 
 
@@ -63,21 +66,21 @@ def identity_block(input_tensor, kernel_size, filters, stage, block, path, non_d
   bn_name_base = str(path) + 'bn' + str(stage) + block + '_branch'
 
   if non_degenerate_temporal_conv == True:
-      x = Conv3D(filters1, (3, 1, 1), padding='same', name=conv_name_base + '2a')(input_tensor)
+      x = Conv3D(filters1, (3, 1, 1), padding='same', kernel_regularizer=l2(1e-4), name=conv_name_base + '2a')(input_tensor)
       x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2a')(x)
       x = Activation('relu')(x)
   else:
-      x = Conv3D(filters1, (1, 1, 1), name=conv_name_base + '2a')(input_tensor)
+      x = Conv3D(filters1, (1, 1, 1), kernel_regularizer=l2(1e-4), name=conv_name_base + '2a')(input_tensor)
       x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2a')(x)
       x = Activation('relu')(x)
 
   x = Conv3D(
-      filters2, kernel_size, padding='same', name=conv_name_base + '2b')(
+      filters2, kernel_size, padding='same', kernel_regularizer=l2(1e-4), name=conv_name_base + '2b')(
           x)
   x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2b')(x)
   x = Activation('relu')(x)
 
-  x = Conv3D(filters3, (1, 1, 1), name=conv_name_base + '2c')(x)
+  x = Conv3D(filters3, (1, 1, 1), kernel_regularizer=l2(1e-4), name=conv_name_base + '2c')(x)
   x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2c')(x)
 
   x = layers.add([x, input_tensor])
@@ -113,27 +116,27 @@ def conv_block(input_tensor, kernel_size, filters, stage, block, path,strides=(1
 
   if non_degenerate_temporal_conv == True:
       x = Conv3D(
-          filters1, (3, 1, 1), strides=strides, padding='same', name=conv_name_base + '2a')(
+          filters1, (3, 1, 1), strides=strides, padding='same', kernel_regularizer=l2(1e-4), name=conv_name_base + '2a')(
               input_tensor)
       x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2a')(x)
       x = Activation('relu')(x)
   else:
       x = Conv3D(
-          filters1, (1, 1, 1), strides=strides, name=conv_name_base + '2a')(
+          filters1, (1, 1, 1), strides=strides, kernel_regularizer=l2(1e-4), name=conv_name_base + '2a')(
               input_tensor)
       x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2a')(x)
       x = Activation('relu')(x)
   x = Conv3D(
-      filters2, kernel_size, padding='same', name=conv_name_base + '2b')(
+      filters2, kernel_size, padding='same', kernel_regularizer=l2(1e-4), name=conv_name_base + '2b')(
           x)
   x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2b')(x)
   x = Activation('relu')(x)
 
-  x = Conv3D(filters3, (1, 1 ,1), name=conv_name_base + '2c')(x)
+  x = Conv3D(filters3, (1, 1 ,1), kernel_regularizer=l2(1e-4), name=conv_name_base + '2c')(x)
   x = BatchNormalization(axis=bn_axis, name=bn_name_base + '2c')(x)
 
   shortcut = Conv3D(
-      filters3, (1, 1, 1), strides=strides, name=conv_name_base + '1')(
+      filters3, (1, 1, 1), strides=strides, kernel_regularizer=l2(1e-4), name=conv_name_base + '1')(
           input_tensor)
   shortcut = BatchNormalization(axis=bn_axis, name=bn_name_base + '1')(shortcut)
 
@@ -142,12 +145,29 @@ def conv_block(input_tensor, kernel_size, filters, stage, block, path,strides=(1
   return x
 
 
-def lateral_connection(fast_res_block,slow_res_block,method = 'T_conv',alpha=8,beta=1/8):
+def lateral_connection(fast_res_block,slow_res_block,stage,method = 'T_conv',alpha=8,beta=1/8):
+    lateral_name = 'lateral'+'_stage_'+str(stage)
+    connection_name = 'connection'+'_stage_'+str(stage)
     if method not in ['T_conv','T_sample','TtoC_sum','TtoC_concat']:
         raise ValueError("method should be one of ['T_conv','T_sample','TtoC_sum','TtoC_concat']")
     if method == 'T_conv':
-        lateral = Conv3D(int(2*beta*int(fast_res_block.shape[4])),padding='same',kernel_size=(5, 1, 1),strides=(int(alpha), 1, 1))(fast_res_block)
-        connection = Concatenate(axis=-1)([slow_res_block,lateral])
+        lateral = Conv3D(int(2*beta*int(fast_res_block.shape[4])),padding='same',kernel_size=(5, 1, 1),strides=(int(alpha), 1, 1), kernel_regularizer=l2(1e-4),name=lateral_name)(fast_res_block)
+        connection = Concatenate(axis=-1,name=connection_name)([slow_res_block,lateral])
+    if method == 'T_sample':
+        def sample(input, stride):
+            return tf.gather(input, tf.range(0, input.shape[1], stride), axis=1)
+        lateral = Lambda(sample,arguments={'stride':alpha},name=lateral_name)(fast_res_block)
+        connection = Concatenate(axis=-1,name=connection_name)([slow_res_block,lateral])
+    if method =='TtoC_concat':
+        lateral = Reshape((int(int(fast_res_block.shape[1])/alpha),int(fast_res_block.shape[2]),int(fast_res_block.shape[3]),int(alpha*fast_res_block.shape[4]))
+                          ,name=lateral_name)(fast_res_block)
+        connection = Concatenate(axis=-1,name=connection_name)([slow_res_block,lateral])
+    if method =='TtoC_sum':
+        if alpha*beta!=1:
+            raise ValueError("The product of alpha and beta must equal 1 in TtoC_sum method")
+        lateral = Reshape((int(int(fast_res_block.shape[1])/alpha),int(fast_res_block.shape[2]),int(fast_res_block.shape[3]),int(alpha*fast_res_block.shape[4]))
+                          ,name=lateral_name)(fast_res_block)
+        connection = Add(name=connection_name)([slow_res_block,lateral])
 
     return connection
 
@@ -174,8 +194,6 @@ def SlowFast_Network(clip_shape=[64,224,224,3],num_class = 400,alpha=8,beta=1/8,
       ValueError: in case of invalid argument for `method`
   """
 
-  clip_shape = clip_shape
-
   clip_input = Input(shape=clip_shape)
   def data_layer(input,stride):
       return tf.gather(input,tf.range(0,64,stride),axis=1)
@@ -191,8 +209,7 @@ def SlowFast_Network(clip_shape=[64,224,224,3],num_class = 400,alpha=8,beta=1/8,
     bn_axis = 1
 
   # ---fast pathway---
-  x_fast = Conv3D(
-      64, (5, 7, 7), strides=(1, 2, 2), padding='same', name='fast_conv1')(fast_input)
+  x_fast = Conv3D(8, (5, 7, 7), strides=(1, 2, 2), padding='same', kernel_regularizer=l2(1e-4), name='fast_conv1')(fast_input)
   x_fast = BatchNormalization(axis=bn_axis, name='fast_bn_conv1')(x_fast)
   x_fast = Activation('relu')(x_fast)
   pool1_fast = MaxPooling3D((1, 3, 3), strides=(1, 2, 2),name='poo1_fast')(x_fast)
@@ -218,23 +235,22 @@ def SlowFast_Network(clip_shape=[64,224,224,3],num_class = 400,alpha=8,beta=1/8,
   res5_fast = identity_block(x_fast, [1, 3, 3], [int(512*beta), int(512*beta), int(2048*beta)], stage=5, path='fast', block='c', non_degenerate_temporal_conv=True)
 
   # ---slow pathway---
-  x = Conv3D(
-      64, (1, 7, 7), strides=(1, 2, 2), padding='same', name='slow_conv1')(slow_input)
+  x = Conv3D(64, (1, 7, 7), strides=(1, 2, 2), padding='same', kernel_regularizer=l2(1e-4), name='slow_conv1')(slow_input)
   x = BatchNormalization(axis=bn_axis, name='slow_bn_conv1')(x)
   x = Activation('relu')(x)
   pool1 = MaxPooling3D((1, 3, 3), strides=(1, 2, 2),name='poo1_slow')(x)
-  pool1_conection = lateral_connection(pool1_fast,pool1,method=method,alpha=alpha,beta=beta)
+  pool1_conection = lateral_connection(pool1_fast,pool1,stage=1,method=method,alpha=alpha,beta=beta)
 
   x = conv_block(pool1_conection, [1, 3, 3], [64, 64, 256], stage=2, block='a', strides=(1, 1 ,1), path='slow')
   x = identity_block(x, [1, 3, 3], [64, 64, 256], stage=2, block='b', path='slow')
   res2 = identity_block(x, [1, 3, 3], [64, 64, 256], stage=2, block='c', path='slow')
-  res2_conection = lateral_connection(res2_fast,res2,method=method,alpha=alpha,beta=beta)
+  res2_conection = lateral_connection(res2_fast,res2,stage=2,method=method,alpha=alpha,beta=beta)
 
   x = conv_block(res2_conection, [1, 3, 3], [128, 128, 512], stage=3, block='a', path='slow')
   x = identity_block(x, [1, 3, 3], [128, 128, 512], stage=3, block='b', path='slow')
   x = identity_block(x, [1, 3, 3], [128, 128, 512], stage=3, block='c', path='slow')
   res3 = identity_block(x, [1, 3, 3], [128, 128, 512], stage=3, block='d', path='slow')
-  res3_conection = lateral_connection(res3_fast,res3,method=method,alpha=alpha,beta=beta)
+  res3_conection = lateral_connection(res3_fast,res3,stage=3,method=method,alpha=alpha,beta=beta)
 
   x = conv_block(res3_conection, [1, 3, 3], [256, 256, 1024], stage=4, block='a', path='slow', non_degenerate_temporal_conv=True)
   x = identity_block(x, [1, 3, 3], [256, 256, 1024], stage=4, block='b', path='slow', non_degenerate_temporal_conv=True)
@@ -242,7 +258,7 @@ def SlowFast_Network(clip_shape=[64,224,224,3],num_class = 400,alpha=8,beta=1/8,
   x = identity_block(x, [1, 3, 3], [256, 256, 1024], stage=4, block='d', path='slow', non_degenerate_temporal_conv=True)
   x = identity_block(x, [1, 3, 3], [256, 256, 1024], stage=4, block='e', path='slow', non_degenerate_temporal_conv=True)
   res4 = identity_block(x, [1, 3, 3], [256, 256, 1024], stage=4, block='f', path='slow', non_degenerate_temporal_conv=True)
-  res4_conection = lateral_connection(res4_fast,res4,method=method,alpha=alpha,beta=beta)
+  res4_conection = lateral_connection(res4_fast,res4,stage=4,method=method,alpha=alpha,beta=beta)
 
   x = conv_block(res4_conection, [1, 3, 3], [512, 512, 2048], stage=5, block='a', path='slow', non_degenerate_temporal_conv=True)
   x = identity_block(x, [1, 3, 3], [512, 512, 2048], stage=5, block='b', path='slow', non_degenerate_temporal_conv=True)
@@ -251,7 +267,8 @@ def SlowFast_Network(clip_shape=[64,224,224,3],num_class = 400,alpha=8,beta=1/8,
   fast_output = GlobalAveragePooling3D(name='avg_pool_fast')(res5_fast)
   slow_output = GlobalAveragePooling3D(name='avg_pool_slow')(res5)
   concat_output = Concatenate(axis=-1)([slow_output,fast_output])
-  output = Dense(num_class,activation='softmax',name = 'fc')(concat_output)
+  concat_output = Dropout(0.5)(concat_output)
+  output = Dense(num_class,activation='softmax', kernel_regularizer=l2(1e-4), name = 'fc')(concat_output)
 
   # Create model.
   inputs = clip_input
